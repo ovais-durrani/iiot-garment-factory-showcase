@@ -1,0 +1,263 @@
+[
+    {
+        "id": "tab_events",
+        "type": "tab",
+        "label": "Event Processing",
+        "disabled": false,
+        "info": ""
+    },
+    {
+        "id": "n_events_in",
+        "type": "mqtt in",
+        "z": "tab_events",
+        "name": "events in",
+        "topic": "factory/+/machine/+/event",
+        "qos": "1",
+        "datatype": "buffer",
+        "broker": "cfg_mqtt",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 130,
+        "y": 80,
+        "wires": [
+            [
+                "n_events_json"
+            ]
+        ]
+    },
+    {
+        "id": "n_events_json",
+        "type": "json",
+        "z": "tab_events",
+        "name": "parse",
+        "property": "payload",
+        "action": "",
+        "pretty": false,
+        "x": 280,
+        "y": 80,
+        "wires": [
+            [
+                "n_events_build",
+                "417ab18986e69c37"
+            ]
+        ]
+    },
+    {
+        "id": "n_events_build",
+        "type": "function",
+        "z": "tab_events",
+        "name": "build event insert",
+        "func": "const p = msg.payload;\nconst machineId = p.machine_id;\n\n// GLOBAL context: shared across ALL function nodes and tabs.\n// (Node-local `context` is private to a single function node — the cause\n// of the earlier \"missing context for L01-M02\" error.)\nlet states = global.get('machineStates') || {};\nlet ctx = states[machineId];\n\nif (!ctx) {\n    ctx = {\n        state: 'STOPPED',\n        state_since: new Date().toISOString(),\n        job_id: null,\n        operator_id: null,\n        fault_code: null\n    };\n}\n\nconst newState = p.new_state || ctx.state;\nif (newState !== ctx.state) {\n    ctx.state_since = p.timestamp || new Date().toISOString();\n}\nctx.state = newState;\n\nif (p.event_type === 'JOB_COMPLETE' && p.payload) {\n    if (p.payload.job_id)      ctx.job_id      = p.payload.job_id;\n    if (p.payload.operator_id) ctx.operator_id = p.payload.operator_id;\n}\nif (p.event_type === 'FAULT' && p.payload) {\n    if (p.payload.fault_code)  ctx.fault_code  = p.payload.fault_code;\n}\nif (newState !== 'FAULT') {\n    ctx.fault_code = null;\n}\n\nstates[machineId] = ctx;\nglobal.set('machineStates', states);\n\n// CRITICAL FIXES:\n//  1. time = p.timestamp (device time), NOT new Date().\n//     This makes retries carry the same (event_id, time) pair so the\n//     unique index catches them — otherwise no dedup on network retry.\n//  2. ON CONFLICT (event_id, time) — matches the DB unique index.\n//     Plain (event_id) is rejected by TimescaleDB (unique indexes must\n//     include the partitioning column `time`).\nmsg.query = `\n  INSERT INTO machine_events\n    (time, event_id, machine_id, line_id, event_type, source,\n     payload, previous_state, new_state, device_ts)\n  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)\n  ON CONFLICT (event_id, time) DO NOTHING\n`;\nmsg.params = [\n    p.timestamp || new Date().toISOString(),\n    p.event_id,\n    machineId,\n    p.line_id,\n    p.event_type,\n    p.source || 'unknown',\n    JSON.stringify(p.payload || {}),\n    p.previous_state || null,\n    p.new_state || null,\n    p.timestamp || null\n];\n\nmsg._machine_id = machineId;\nmsg._line_id = p.line_id;\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 440,
+        "y": 80,
+        "wires": [
+            [
+                "n_events_insert"
+            ]
+        ]
+    },
+    {
+        "id": "n_events_status",
+        "type": "function",
+        "z": "tab_events",
+        "name": "build status upsert",
+        "func": "const machineId = msg._machine_id;\nconst lineId    = msg._line_id;\n\nif (!machineId) { node.error('missing _machine_id in msg'); return null; }\n\nconst states = global.get('machineStates') || {};\nconst ctx = states[machineId];\n\nif (!ctx) {\n    node.error('missing state for ' + machineId + ' (build event insert did not run?)');\n    return null;\n}\n\nmsg.query = `\n  INSERT INTO machine_status\n    (machine_id, line_id, state, state_since, last_event_time,\n     job_id, operator_id, fault_code, updated_at)\n  VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())\n  ON CONFLICT (machine_id) DO UPDATE SET\n    state           = EXCLUDED.state,\n    state_since     = EXCLUDED.state_since,\n    last_event_time = EXCLUDED.last_event_time,\n    job_id          = EXCLUDED.job_id,\n    operator_id     = EXCLUDED.operator_id,\n    fault_code      = EXCLUDED.fault_code,\n    updated_at      = now()\n`;\nmsg.params = [\n    machineId,\n    lineId,\n    ctx.state,\n    ctx.state_since,\n    new Date().toISOString(),\n    ctx.job_id,\n    ctx.operator_id,\n    ctx.fault_code\n];\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 840,
+        "y": 80,
+        "wires": [
+            [
+                "n_events_upsert"
+            ]
+        ]
+    },
+    {
+        "id": "n_events_publish_prep",
+        "type": "function",
+        "z": "tab_events",
+        "name": "prepare state publish",
+        "func": "const machineId = msg._machine_id;\nconst lineId    = msg._line_id;\n\nif (!machineId) { node.error('missing _machine_id'); return null; }\n\nconst states = global.get('machineStates') || {};\nconst ctx = states[machineId];\n\nif (!ctx) { node.error('missing state for ' + machineId); return null; }\n\nmsg.topic = 'factory/' + lineId + '/machine/' + machineId + '/state';\nmsg.payload = {\n    schema_version: 1,\n    machine_id: machineId,\n    line_id: lineId,\n    state: ctx.state,\n    state_since: ctx.state_since,\n    last_event_time: new Date().toISOString(),\n    job_id: ctx.job_id,\n    operator_id: ctx.operator_id,\n    fault_code: ctx.fault_code,\n    source: 'node-red'\n};\nmsg.qos = 1;\nmsg.retain = true;\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1230,
+        "y": 80,
+        "wires": [
+            [
+                "n_events_publish",
+                "n_events_debug"
+            ]
+        ]
+    },
+    {
+        "id": "n_events_publish",
+        "type": "mqtt out",
+        "z": "tab_events",
+        "name": "publish state",
+        "topic": "",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "cfg_mqtt",
+        "x": 1440,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "n_events_debug",
+        "type": "debug",
+        "z": "tab_events",
+        "name": "state publish",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1430,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "n_events_link_in",
+        "type": "link in",
+        "z": "tab_events",
+        "name": "to-events",
+        "links": [
+            "n_watchdog_link"
+        ],
+        "x": 220,
+        "y": 200,
+        "wires": [
+            [
+                "n_events_build"
+            ]
+        ]
+    },
+    {
+        "id": "n_events_insert",
+        "type": "postgresql",
+        "z": "tab_events",
+        "name": "INSERT event",
+        "query": "",
+        "postgreSQLConfig": "cfg_pg",
+        "split": false,
+        "rowsPerMsg": 1,
+        "outputs": 1,
+        "x": 640,
+        "y": 80,
+        "wires": [
+            [
+                "n_events_status"
+            ]
+        ]
+    },
+    {
+        "id": "n_events_upsert",
+        "type": "postgresql",
+        "z": "tab_events",
+        "name": "UPSERT status",
+        "query": "",
+        "postgreSQLConfig": "cfg_pg",
+        "split": false,
+        "rowsPerMsg": 1,
+        "outputs": 1,
+        "x": 1030,
+        "y": 80,
+        "wires": [
+            [
+                "n_events_publish_prep"
+            ]
+        ]
+    },
+    {
+        "id": "417ab18986e69c37",
+        "type": "debug",
+        "z": "tab_events",
+        "name": "debug 1",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 500,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "cfg_mqtt",
+        "type": "mqtt-broker",
+        "name": "local-mosquitto",
+        "broker": "mosquitto",
+        "port": "1883",
+        "clientid": "node-red-events",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "cfg_pg",
+        "type": "postgreSQLConfig",
+        "name": "iiot-db",
+        "host": "timescaledb",
+        "hostFieldType": "str",
+        "port": 5432,
+        "portFieldType": "num",
+        "database": "iiot",
+        "databaseFieldType": "str",
+        "ssl": "false",
+        "sslFieldType": "bool",
+        "applicationName": "",
+        "applicationNameType": "str",
+        "max": 10,
+        "maxFieldType": "num",
+        "idle": 1000,
+        "idleFieldType": "num",
+        "connectionTimeout": 10000,
+        "connectionTimeoutFieldType": "num",
+        "userFieldType": "cred",
+        "userEnv": "",
+        "passwordFieldType": "cred",
+        "passwordEnv": ""
+    }
+]

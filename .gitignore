@@ -1,0 +1,33 @@
+cat > .gitignore <<'EOF'
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+flows_cred.json
+
+# Runtime data
+pgdata/
+nodered_data/
+grafana_data/
+mosquitto_data/
+mosquitto_log/
+*.log
+simulator.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+EOF

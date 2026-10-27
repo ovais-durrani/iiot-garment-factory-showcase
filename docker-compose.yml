@@ -1,0 +1,105 @@
+networks:
+  iiot:
+    driver: bridge
+
+volumes:
+  pgdata:
+  mosquitto_data:
+  mosquitto_log:
+  nodered_data:
+  grafana_data:
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: iiot-mosquitto
+    ports: ["1883:1883"]
+    volumes:
+      - ./config/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    networks: [iiot]
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
+
+  timescaledb:
+    image: timescale/timescaledb:2.15.0-pg16
+    container_name: iiot-timescaledb
+    environment:
+      POSTGRES_DB: iiot
+      POSTGRES_USER: iiot
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./config/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports: ["5432:5432"]
+    networks: [iiot]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iiot -d iiot"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
+
+  telegraf:
+    image: telegraf:1.31
+    container_name: iiot-telegraf
+    environment:
+      PG_PASSWORD: ${PG_PASSWORD}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    volumes:
+      - ./config/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    networks: [iiot]
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
+
+  nodered:
+    image: nodered/node-red:4.0
+    container_name: iiot-nodered
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    ports: ["1880:1880"]
+    volumes:
+      - nodered_data:/data
+      - ./config/node-red/flows.json:/data/flows.json:rw
+    environment:
+      TZ: Asia/Karachi
+    networks: [iiot]
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: iiot-grafana
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    ports: ["3000:3000"]
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_INSTALL_PLUGINS: ""
+      GF_AUTH_ANONYMOUS_ENABLED: "true" # Optional: allows viewing dashboards without login in lab
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      PG_PASSWORD: ${PG_PASSWORD}
+    networks: [iiot]
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
