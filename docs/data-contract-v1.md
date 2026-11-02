@@ -1,13 +1,26 @@
-# Garment Factory IIoT — Data Contract v1.0.0
+# Garment Factory IIoT — Data Contract v1.0.1
 
 | Field | Value |
 |---|---|
 | Document ID | `DC-IIOT-001` |
-| Version | `1.0.0` |
-| Status | **DRAFT — built without customer. All `[ASSUMPTION]` items unvalidated.** |
+| Version | `1.0.1` |
+| Status | **Phase 0 — built without customer. All `[ASSUMPTION]` items unvalidated.** |
 | Owner | Solutions Architect (self) |
-| Last updated | 2025-01-15 |
-| Related docs | `architecture-blueprint.md`, `build-plan.md` |
+| Last updated | 2026-11-03 |
+| Related docs | `architecture-blueprint.md`, `data-flow-diagram.md` |
+
+---
+
+## Implementation Status
+
+> **This contract describes the *intended* design.** Sections marked
+> `[Phase 0 status]` describe features that are designed but not yet implemented
+> in the Phase 0 codebase. The schema (`config/postgres/init/01_schema.sql`) is
+> the ground truth for what is currently deployed.
+>
+> **One TimescaleDB-specific constraint shaped the schema's deduplication index.**
+> See §15 for the `(event_id, time)` requirement — it is not optional, and
+> getting it wrong fails silently at `CREATE INDEX` time.
 
 ---
 
@@ -23,6 +36,8 @@ This contract is the **single source of truth** for:
 **Rule:** No device, service, or dashboard may publish or consume a payload that is not defined here. Any change requires a version bump (§11) and a Git commit.
 
 **Rule:** Items tagged **`[ASSUMPTION]`** are educated industry defaults chosen in the absence of a customer. Each has a *Validate by* (what to check once a real factory is available) and *If wrong, impact* (what to change). Do **not** remove the tags until validated against a real line.
+
+**Rule:** Items tagged **`[Phase 0 status]`** describe features that are designed but not yet implemented. They are part of the intended architecture, not the deployed system. See the Implementation Status note above.
 
 ---
 
@@ -196,7 +211,7 @@ factory/{line_id}/machine/{machine_id}/{channel}
 **Rules:**
 - **No messages outside this namespace.** No `$SYS` reliance (monitoring only, not a data path).
 - `power` is QoS 0: an individual sample is disposable; losing one 5-second reading is irrelevant.
-- `event` is QoS 1: every event must be delivered at least once (dedup handled at DB layer by `event_id` UNIQUE).
+- `event` is QoS 1: every event must be delivered at least once. Deduplication is handled at the DB layer via a `(event_id, time)` UNIQUE index — **not** `event_id` alone. See §8.2 and §15.
 - `state` is **retained**: a new consumer instantly gets current state without waiting for the next transition.
 - LWT (Last Will and Testament) for every device: topic `factory/{line}/machine/{id}/state`, payload `{"schema_version":1,"machine_id":"...","state":"OFFLINE","state_since":"...","source":"lwt"}`. This fires instantly when a device drops TCP, before the 60 s heartbeat timeout.
 
@@ -210,10 +225,14 @@ factory/{line_id}/machine/{machine_id}/{channel}
 - `machine_id`, `line_id` — always present, matching §3 regex.
 - `source` (string) — origin identifier (`"esp32_L01-M05"`, `"meter_schneider_01"`, `"simulator"`, `"node-red"`).
 
-**Timestamp policy (§6.0):**
+### 6.0 Timestamp policy
+
 - Devices with RTC (DS3231) → `timestamp` = RTC time, resynced to NTP/gateway every 15 min.
 - Devices without RTC → `timestamp` = last known time from gateway + monotonic uptime; accuracy ±5 s.
-- Gateway receives all events and records `ingest_time = now()` server-side for ordering. If `|ingest_time − timestamp| > 30 s`, flag the event with `clock_skew_warning: true` in the DB (not in the payload — added by Node-RED).
+
+> **[Phase 0 status]** The `ingest_time = now()` server-side ordering column and the `clock_skew_warning: true` flag described in earlier versions of this contract are **not yet implemented**. The current schema stores `device_ts` (device time) and `time` (same device time, used for partitioning). No server-time column exists. Planned for Phase 2 hardening.
+
+**Why device-side timestamps matter for deduplication:** see §15.
 
 ---
 
@@ -253,7 +272,7 @@ factory/{line_id}/machine/{machine_id}/{channel}
 
 **Notes:**
 - `power_w` is the *derived* real power. If the meter provides it directly, use the meter value. If ESP32 computes it, use `V × I × PF`.
-- `quality = "suspect"` when any reading fails the outlier check (see §8 noise handling).
+- `quality = "suspect"` when any reading fails the outlier check (§8.1).
 - No `payload` wrapper on power — fields are flat for Telegraf `json_v2` mapping efficiency.
 
 ---
@@ -400,7 +419,7 @@ factory/{line_id}/machine/{machine_id}/{channel}
 | `uptime_s` | int | ❌ | For health monitoring |
 | `free_heap_b` | int | ❌ | ESP32 health |
 | `rssi_dbm` | int | ❌ | Wi-Fi signal |
-| `buffered_events` | int | ✅ | Critical for resilience monitoring (§4.2 of blueprint) |
+| `buffered_events` | int | ✅ | Critical for resilience monitoring |
 
 Every 30 s. Absence for 60 s → OFFLINE.
 
@@ -452,20 +471,20 @@ Generic sewing-machine fault catalogue. To be replaced with the real machine con
 |---|---|---|
 | Outlier | reading > 3× rolling median of last 5 samples | Discard sample; emit `quality: "suspect"` with previous value |
 | Inrush | first sample after `STOPPED → RUNNING` | Flag `quality: "suspect"` for 2 s; exclude from OEE power but keep in DB |
-| Stale | no power sample for 30 s while heartbeat present | Raise `POWER_STALE` alert (Node-RED) |
+| Stale | no power sample for 30 s while heartbeat present | `[Phase 0 status]` `POWER_STALE` alert not yet implemented — see §8.2 note |
 | Negative | any of V/I/W < 0 | Set `quality: "bad"`; discard from analytics |
 
 ### 8.2 Event quality
 
 | Rule | Condition | Action |
 |---|---|---|
-| Duplicate | `event_id` already in `machine_events` | `ON CONFLICT (event_id) DO NOTHING` — silently drop |
-| Clock skew | `abs(ingest_time − timestamp) > 30 s` | Store as-is; add `clock_skew_warning=true` to `machine_events.payload` (Node-RED adds) |
+| Duplicate | `(event_id, time)` already in `machine_events` | `ON CONFLICT (event_id, time) DO NOTHING` — silently drop. TimescaleDB requires the unique index on a hypertable to include the partitioning column (`time`). Using `event_id` alone fails silently at `CREATE INDEX` time and only surfaces as an `ON CONFLICT` error on the first duplicate. **See §15.** |
+| Clock skew | `abs(ingest_time − timestamp) > 30 s` | `[Phase 0 status]` Not yet implemented — the `ingest_time` column and `clock_skew_warning` flag are planned for Phase 2 (see §6.0) |
 | Out-of-order | event `timestamp` < last event for machine | Store as-is (TimescaleDB handles); do **not** rewrite state |
-| Orphan | event for unknown `machine_id` | Store; raise `UNKNOWN_MACHINE` alert |
-| Invalid JSON | parse failure | Log to `dead_letter` table; raise alert |
+| Orphan | event for unknown `machine_id` | `[Phase 0 status]` `UNKNOWN_MACHINE` alert not yet implemented. Event is stored; no alert raised. Planned for Phase 2 |
+| Invalid JSON | parse failure | Log to `dead_letter` table; raise alert. `[Phase 0 status]` `dead_letter` table exists in schema, but the `parse` node's error output is currently unwired — malformed events are dropped silently. Planned for Phase 2 (see §8.3 note) |
 
-### 8.3 `dead_letter` table (add to schema)
+### 8.3 `dead_letter` table
 
 ```sql
 CREATE TABLE dead_letter (
@@ -476,6 +495,8 @@ CREATE TABLE dead_letter (
 );
 SELECT create_hypertable('dead_letter','time', chunk_time_interval => INTERVAL '7 days');
 ```
+
+> **[Phase 0 status]** The `dead_letter` table exists in the schema, but the Node-RED flow does not currently write to it. The `parse` node's output 2 (error output) is unwired — malformed MQTT payloads are dropped silently. Wiring it is a 5-minute Phase 2 hardening task once the flow is stable.
 
 ---
 
@@ -522,11 +543,11 @@ These are **hard gates** — pilot line does not go live until all are met:
 |---|---|---|
 | `power` | 0 | Sample is disposable |
 | `heartbeat` | 0 | Next one in 30 s anyway |
-| `event` | 1 | At-least-once; dedup at DB |
+| `event` | 1 | At-least-once; dedup at DB via `(event_id, time)` |
 | `state` | 1 + retain | Must reach all consumers; last value always available |
 | `cmd` | 1 | Must reach device |
 
-**Rule:** No QoS 2 anywhere. It adds handshake overhead for no benefit in this architecture (dedup is at the application layer via `event_id`).
+**Rule:** No QoS 2 anywhere. It adds handshake overhead for no benefit in this architecture (dedup is at the application layer via `(event_id, time)`).
 
 ---
 
@@ -535,9 +556,9 @@ These are **hard gates** — pilot line does not go live until all are met:
 ### 11.1 Schema version rules
 
 - `schema_version` is an integer per payload.
-- **Breaking changes** (remove field, change type, change meaning) → **major bump** (`1 → 2`). Requires: update this document, update `data-contract-v2.md`, dual-publish during transition, update all consumers.
+- **Breaking changes** (remove field, change type, change meaning) → **major bump** (`1 → 2`). Requires: update this document, create `data-contract-v2.md`, dual-publish during transition, update all consumers.
 - **Additive changes** (new optional field) → **minor bump** in document version (`1.0 → 1.1`), `schema_version` stays `1` (additive fields are ignored by old consumers).
-- **Bug fixes** (typo in description) → **patch** (`1.0.0 → 1.0.1`).
+- **Bug fixes** (typo in description) → **patch** (`1.0.1 → 1.0.2`).
 
 ### 11.2 Topic versioning
 
@@ -559,56 +580,13 @@ Before any device joins the network, it must pass:
 | Test | Method | Pass |
 |---|---|---|
 | Topic conformance | `mosquitto_sub -t 'factory/#' -v` | Only defined topics appear |
-| Schema validation | `jsonschema` against §6 | 100% valid |
+| Schema validation | `tools/validate_contract.py` against §6 | 100% valid |
 | Naming conformance | Regex check on `machine_id`, `line_id`, `event_id` | 100% match |
-| State model | Scripted scenarios (`test/state_scenarios.yaml`) | All transitions correct |
+| State model | Manual scripted scenarios (see `simulator/sim_machines.py` for the transitions used to test) | All transitions correct |
 | QoS | `mosquitto_sub -q 1` receives every event | 0 lost in 1 h |
 | Retention | New subscriber to `state` gets retained message | Immediate payload |
 
-**Validation script** (`tools/validate_contract.py`) — commit alongside:
-
-```python
-#!/usr/bin/env python3
-"""Validate any payload against data-contract-v1 schemas."""
-import json, re, sys, uuid
-
-LINE_RE = re.compile(r"^L[0-9]{2}$")
-MACHINE_RE = re.compile(r"^L[0-9]{2}-M[0-9]{2}$")
-JOB_RE = re.compile(r"^JOB-[0-9]{4}-[0-9]{5}$")
-OP_RE = re.compile(r"^OP-[0-9]{3,5}$")
-FAULT_RE = re.compile(r"^E-[0-9]{3}$")
-
-def validate_common(p):
-    errs = []
-    if p.get("schema_version") != 1: errs.append("schema_version != 1")
-    if not MACHINE_RE.match(p.get("machine_id","")): errs.append("bad machine_id")
-    if not LINE_RE.match(p.get("line_id","")): errs.append("bad line_id")
-    if "timestamp" not in p: errs.append("missing timestamp")
-    if "source" not in p: errs.append("missing source")
-    return errs
-
-def validate_event(p):
-    errs = validate_common(p)
-    try: uuid.UUID(p.get("event_id",""))
-    except ValueError: errs.append("bad event_id")
-    if p.get("event_type") not in ("JOB_COMPLETE","FAULT","STATE_CHANGE"):
-        errs.append("bad event_type")
-    return errs
-
-def validate_power(p):
-    errs = validate_common(p)
-    for f in ("voltage_v","current_a","power_w"):
-        if not isinstance(p.get(f), (int,float)): errs.append(f"bad {f}")
-    return errs
-
-if __name__ == "__main__":
-    payload = json.load(sys.stdin)
-    if "event_type" in payload:   errs = validate_event(payload)
-    elif "power_w" in payload:    errs = validate_power(payload)
-    else:                          errs = validate_common(payload)
-    print("VALID" if not errs else "INVALID: " + "; ".join(errs))
-    sys.exit(0 if not errs else 1)
-```
+**Validation script:** `tools/validate_contract.py` — validates any MQTT payload against §6 schemas. No third-party dependencies (Python 3.9+ stdlib only).
 
 ---
 
@@ -617,6 +595,7 @@ if __name__ == "__main__":
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 1.0.0 | 2025-01-15 | Architect | Initial draft. All `[ASSUMPTION]` items unvalidated. |
+| 1.0.1 | 2026-11-03 | Architect | Corrected §5 and §8.2: `event_id` UNIQUE → `(event_id, time)` UNIQUE (TimescaleDB constraint). Added §15 documenting the constraint. Added `[Phase 0 status]` notes to §6.0, §8.1, §8.2, §8.3 for aspirational features. Fixed §12 references (`build-plan.md` → `data-flow-diagram.md`, `test/state_scenarios.yaml` → `simulator/sim_machines.py`, `jsonschema` → `tools/validate_contract.py`). No `schema_version` bump — payload shapes unchanged. |
 
 ---
 
@@ -647,4 +626,55 @@ Print this. Fill in on Day 1 of engagement. **Do not proceed past Phase 1 until 
 
 ---
 
-*End of Data Contract v1.0.0*
+## 15. TimescaleDB Deduplication — The `(event_id, time)` Requirement
+
+**This is a TimescaleDB-specific constraint that is easy to miss and expensive to debug.**
+
+PostgreSQL allows `CREATE UNIQUE INDEX ON machine_events (event_id)`. TimescaleDB **does not** — hypertables partition by `time`, and any unique index must include the partitioning column. The `CREATE UNIQUE INDEX` statement returns success but **creates nothing** at the storage layer. The first `INSERT ... ON CONFLICT (event_id)` then fails at runtime with:
+
+```
+there is no unique or exclusion constraint matching the ON CONFLICT specification
+```
+
+### The correct design
+
+```sql
+CREATE UNIQUE INDEX machine_events_event_id_time_uniq
+  ON machine_events (event_id, time);
+```
+
+```sql
+INSERT INTO machine_events (time, event_id, ...) VALUES ($1, $2, ...)
+ON CONFLICT (event_id, time) DO NOTHING
+```
+
+### Why `time` must be the device timestamp, not `now()`
+
+For deduplication to work, `(event_id, time)` must be **identical across retries**. That requires `time` to be the event's original device-side timestamp — not the server's `now()` when the INSERT runs:
+
+- **Correct:** `time = payload.timestamp` — same on every retry → conflict fires → duplicate skipped
+- **Wrong:** `time = new Date()` — different on every retry → no conflict → duplicate lands
+
+This is why §6.0 mandates device-side timestamps with RTC accuracy, and why the ESP32 buffer flushes events with their **original** timestamps, not the flush time.
+
+### Verification
+
+```bash
+docker exec iiot-timescaledb psql -U iiot -d iiot -c "\d machine_events" | grep unique
+```
+
+**Expected:**
+
+```
+"machine_events_event_id_time_uniq" UNIQUE, btree (event_id, "time")
+```
+
+If this returns nothing, the unique index does not exist — `ON CONFLICT` will fail on the first duplicate. **This is the check to run after any schema change on a hypertable.**
+
+### Broader principle
+
+Every TimescaleDB unique index on a hypertable must include the partitioning column. If you add more hypertables with unique constraints in future phases, apply the same rule. The failure mode is identical: `CREATE INDEX` succeeds, `INSERT` fails, and the failure only surfaces at the first duplicate — sometimes days after deployment.
+
+---
+
+*End of Data Contract v1.0.1*
