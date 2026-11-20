@@ -128,13 +128,13 @@ Every factory-dependent decision, with its validation path. **This table is the 
 
 ### 4.1 States
 
-| State | Code | Meaning | Counts as OEE downtime? |
-|---|---|---|---|
-| Running | `RUNNING` | Machine actively sewing (current > threshold, input high). | No |
-| Idle | `IDLE` | Machine powered, operator present, no active work. | No `[ASSUMPTION A-02]` |
-| Stopped | `STOPPED` | Machine powered down / no operator during shift. | Yes `[ASSUMPTION A-03]` |
-| Fault | `FAULT` | Active fault condition (relay asserted). | Yes |
-| Offline | `OFFLINE` | No heartbeat received for > 60 s. | Treated as `STOPPED` for OEE |
+| State   | Code      | Meaning                                                    | Counts as OEE downtime?      |
+| ------- | --------- | ---------------------------------------------------------- | ---------------------------- |
+| Running | `RUNNING` | Machine actively sewing (current > threshold, input high). | No                           |
+| Idle    | `IDLE`    | Machine powered, operator present, no active work.         | No `[ASSUMPTION A-02]`       |
+| Stopped | `STOPPED` | Machine powered down / no operator during shift.           | Yes `[ASSUMPTION A-03]`      |
+| Fault   | `FAULT`   | Active fault condition (relay asserted).                   | Yes                          |
+| Offline | `OFFLINE` | No heartbeat received for > 60 s.                          | Treated as `STOPPED` for OEE |
 
 ### 4.2 Allowed Transitions
 
@@ -175,17 +175,17 @@ STOPPED ◄──── STOPPED ◄── FAULT
 
 ### 4.3 Thresholds (initial defaults, `[ASSUMPTION A-08]`)
 
-| Parameter | Value | Notes |
-|---|---|---|
-| `RUN_THRESHOLD` | 1.0 A | ≥ 10% of typical running current |
-| `IDLE_THRESHOLD` | 0.3 A | Below this = not sewing |
-| `STOP_THRESHOLD` | 0.3 A | Same as idle for v1 |
-| `RUN_DEBOUNCE` | 3 s | |
-| `IDLE_DEBOUNCE` | 15 s | > typical fabric-adjust pause |
-| `STOP_DEBOUNCE` | 10 s | > typical quick pause |
-| `FAULT_DEBOUNCE` | 200 ms | |
-| `HEARTBEAT_INTERVAL` | 30 s | |
-| `OFFLINE_AFTER` | 60 s | 2 missed heartbeats |
+| Parameter            | Value  | Notes                            |
+| -------------------- | ------ | -------------------------------- |
+| `RUN_THRESHOLD`      | 1.0 A  | ≥ 10% of typical running current |
+| `IDLE_THRESHOLD`     | 0.3 A  | Below this = not sewing          |
+| `STOP_THRESHOLD`     | 0.3 A  | Same as idle for v1              |
+| `RUN_DEBOUNCE`       | 3 s    |                                  |
+| `IDLE_DEBOUNCE`      | 15 s   | > typical fabric-adjust pause    |
+| `STOP_DEBOUNCE`      | 10 s   | > typical quick pause            |
+| `FAULT_DEBOUNCE`     | 200 ms |                                  |
+| `HEARTBEAT_INTERVAL` | 30 s   |                                  |
+| `OFFLINE_AFTER`      | 60 s   | 2 missed heartbeats              |
 
 ---
 
@@ -195,13 +195,13 @@ STOPPED ◄──── STOPPED ◄── FAULT
 factory/{line_id}/machine/{machine_id}/{channel}
 ```
 
-| Channel | Direction | Publisher | Subscriber | QoS | Retain | Payload |
-|---|---|---|---|---|---|---|
-| `power` | Device → Broker | ESP32 / meter | Telegraf | **0** | false | §6.1 |
-| `event` | Device → Broker | ESP32 | Node-RED | **1** | false | §6.2–6.4 |
-| `state` | Broker → All | Node-RED | Grafana/consumers | **1** | **true** | §6.5 |
-| `heartbeat` | Device → Broker | ESP32 | Node-RED | 0 | false | §6.6 |
-| `cmd` | Broker → Device | Consumers | ESP32 | 1 | false | §6.7 |
+| Channel     | Direction       | Publisher     | Subscriber        | QoS   | Retain   | Payload  |
+| ----------- | --------------- | ------------- | ----------------- | ----- | -------- | -------- |
+| `power`     | Device → Broker | ESP32 / meter | Telegraf          | **0** | false    | §6.1     |
+| `event`     | Device → Broker | ESP32         | Node-RED          | **1** | false    | §6.2–6.4 |
+| `state`     | Broker → All    | Node-RED      | Grafana/consumers | **1** | **true** | §6.5     |
+| `heartbeat` | Device → Broker | ESP32         | Node-RED          | 0     | false    | §6.6     |
+| `cmd`       | Broker → Device | Consumers     | ESP32             | 1     | false    | §6.7     |
 
 **Wildcards used by services:**
 - Telegraf: `factory/+/machine/+/power`
