@@ -22,7 +22,7 @@ Designed for 1,000 machines across 50 production lines, starting from a single p
 - **No production deployment.** No TLS, no per-device auth, no HA. Those are Phase 2 gates.
 
 ## Architecture
-
+```
 ┌──────────┐      ┌─────────────┐      ┌──────────┐      ┌────────────┐
 │Simulator │      │   MQTT      │      │ Telegraf │      │            │
 │ / ESP32  │─────►│  Broker     │─────►│ (power)  │─────►│            │
@@ -41,7 +41,7 @@ Designed for 1,000 machines across 50 production lines, starting from a single p
                                                          │  Grafana   │
                                                          └────────────┘
 
-
+```
 - **Telegraf** handles high-frequency power telemetry (200 msg/s at scale) — stateless, batched, fast
 - **Node-RED** handles low-frequency events (state changes, faults, job completes) — stateful, with hysteresis and deduplication
 - **TimescaleDB** is the system of record — hypertables, continuous aggregates, event dedup via `(event_id, time)`
